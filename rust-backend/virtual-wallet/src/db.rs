@@ -74,7 +74,8 @@ impl WalletDatabase {
                 settled_at TEXT,
                 settlement_value REAL,
                 actual_temperature REAL,
-                pnl REAL
+                pnl REAL,
+                rsi_version TEXT DEFAULT 'v2'
             )",
         )
         .execute(&self.pool)
@@ -195,6 +196,9 @@ impl WalletDatabase {
         self.add_column_if_missing("btc_trade_ledger", "reconstruction_source", "TEXT DEFAULT NULL").await?;
         self.add_column_if_missing("btc_trade_ledger", "match_score", "REAL DEFAULT NULL").await?;
 
+        // Add rsi_version column if missing (added for multi-RSI strategy)
+        self.add_column_if_missing("virtual_positions", "rsi_version", "TEXT DEFAULT 'v2'").await?;
+
         Ok(())
     }
 
@@ -301,8 +305,8 @@ impl WalletDatabase {
                 wallet_id, market_id, market_question, token_id, direction, entry_price,
                 effective_entry, size, quantity, fee, slippage, category,
                 target_date, threshold_f, city_name, metric, event_slug,
-                window_end, btc_price, status, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 'open', datetime('now'))"
+                window_end, btc_price, status, created_at, rsi_version
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, 'open', datetime('now'), 'v2')"
         )
         .bind(&self.wallet_id)
         .bind(&pos.market_id)

@@ -871,13 +871,56 @@ fn evaluate_settlement(question: &str, trade_direction: &str, threshold: Option<
     if trade_wins { 1.0 } else { 0.0 }
 }
 
-/// Create a reqwest client that routes through the local Clash proxy.
-/// data-api.binance.vision used to work without proxy but is now blocked.
+/// Create a reqwest client. Uses HTTP proxy if HTTP_PROXY env var is set,
+/// otherwise connects directly.
 fn proxied_client(timeout_secs: u64) -> Result<reqwest::Client, Box<dyn std::error::Error + Send + Sync>> {
-    let proxy = reqwest::Proxy::all("http://127.0.0.1:7890")?;
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .proxy(proxy)
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs));
+
+    // Only use proxy if explicitly configured via env var
+    if let Ok(proxy_url) = std::env::var("HTTP_PROXY")
+        .or_else(|_| std::env::var("HTTPS_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("https_proxy"))
+    {
+        // Quick check: can we reach the proxy? If not, skip it.
+        if std::net::TcpStream::connect_timeout(
+            &proxy_url
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split(':')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join(":")
+                .parse::<std::net::SocketAddr>()
+                .unwrap_or_else(|_| {
+                    // Fallback: parse host:port from URL
+                    let parts: Vec<&str> = proxy_url
+                        .trim_start_matches("http://")
+                        .trim_start_matches("https://")
+                        .split('/')
+                        .next()
+                        .unwrap_or("")
+                        .split(':')
+                        .collect();
+                    let host = parts.first().unwrap_or(&"127.0.0.1");
+                    let port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(7890);
+                    format!("{host}:{port}").parse().unwrap_or_else(|_| {
+                        "127.0.0.1:7890".parse().unwrap()
+                    })
+                }),
+            std::time::Duration::from_secs(2),
+        )
+        .is_ok()
+        {
+            tracing::info!("Using HTTP proxy: {}", proxy_url);
+            builder = builder.proxy(reqwest::Proxy::all(&proxy_url)?);
+        } else {
+            tracing::info!("Proxy {} not reachable, connecting directly", proxy_url);
+        }
+    }
+
+    builder
         .build()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }

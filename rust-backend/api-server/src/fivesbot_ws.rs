@@ -36,7 +36,36 @@ const WS_URL: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const WS_HOST: &str = "ws-subscriptions-clob.polymarket.com:443";
 
 /// Local Clash proxy for outbound connections.
-const PROXY_ADDR: &str = "127.0.0.1:7890";
+/// Only used when HTTP_PROXY env var is set and the proxy is reachable.
+fn get_proxy_addr() -> Option<String> {
+    let proxy_url = std::env::var("HTTP_PROXY")
+        .or_else(|_| std::env::var("HTTPS_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("https_proxy"))
+        .ok()?;
+
+    // Extract host:port from proxy URL
+    let addr = proxy_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()?
+        .to_string();
+
+    // Quick reachability check
+    let parts: Vec<&str> = addr.split(':').collect();
+    let host = parts.first()?;
+    let port: u16 = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(7890);
+    let sock_addr: std::net::SocketAddr = format!("{host}:{port}").parse().ok()?;
+
+    if std::net::TcpStream::connect_timeout(&sock_addr, std::time::Duration::from_secs(2)).is_ok() {
+        info!("🔌 WS using proxy: {}", addr);
+        Some(addr)
+    } else {
+        info!("🔌 WS proxy {} not reachable, connecting directly", addr);
+        None
+    }
+}
 
 /// How often the market-window change detector re-evaluates.
 const MARKET_CHECK_INTERVAL_SECS: u64 = 10;
@@ -115,7 +144,21 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 /// One WS session: connect → resolve tokens → subscribe → read.
 /// Returns Ok when the market window changed (need reconnect with new state).
 async fn run_ws_session(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let tcp = proxy_tcp_connect(PROXY_ADDR, WS_HOST).await?;
+    let tcp = if let Some(proxy_addr) = get_proxy_addr() {
+        proxy_tcp_connect(&proxy_addr, WS_HOST).await?
+    } else {
+        let addr = WS_HOST
+            .split(':')
+            .next()
+            .unwrap_or("ws-subscriptions-clob.polymarket.com");
+        let port: u16 = WS_HOST
+            .split(':')
+            .nth(1)
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(443);
+        info!("🔌 WS connecting directly to {}:{}", addr, port);
+        TcpStream::connect(format!("{addr}:{port}")).await?
+    };
     let ws_stream = tokio_tungstenite::client_async_tls_with_config(
         WS_URL,
         tcp,
@@ -124,7 +167,7 @@ async fn run_ws_session(state: Arc<AppState>) -> Result<(), Box<dyn std::error::
     )
     .await?
     .0;
-    info!("🔌 Connected to {} (via proxy)", WS_URL);
+    info!("🔌 Connected to {}", WS_URL);
     let (mut write, mut read) = ws_stream.split();
 
     // Resolve tokens and subscribe
