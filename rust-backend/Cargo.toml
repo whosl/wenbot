@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "virtual-wallet",
+    "fivesbot-strategy",
+    "wenbot-strategy",
+    "polymarket-client",
+    "api-server",
+    "backtest",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+# HTTP
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "socks"], default-features = false }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# Error handling
+anyhow = "1"
+thiserror = "2"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Crypto
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+# Utils
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+dotenvy = "0.15"
+async-trait = "0.1"

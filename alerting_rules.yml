@@ -1,0 +1,155 @@
+# Alerting Rules Configuration
+# Prometheus alerting rules for wenbot
+
+groups:
+  - name: wenbot_critical
+    interval: 30s
+    rules:
+      # Bot health alerts
+      - alert: BotDown
+        expr: up{job="wenbot"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Weather bot is down"
+          description: "Weather bot has been down for more than 1 minute"
+      
+      - alert: DatabaseConnectionFailed
+        expr: wenbot_database_connection_status == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database connection failed"
+          description: "Cannot connect to database for 2 minutes"
+      
+      - alert: PolymarketAPIUnhealthy
+        expr: wenbot_polymarket_connection_status == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Polymarket API is unhealthy"
+          description: "Cannot reach Polymarket API for 5 minutes"
+      
+      - alert: OpenMeteoAPIUnhealthy
+        expr: wenbot_openmeteo_connection_status == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Open-Meteo API is unhealthy"
+          description: "Cannot reach Open-Meteo API for 5 minutes"
+
+  - name: wenbot_trading
+    interval: 1m
+    rules:
+      # Trading alerts
+      - alert: HighLossRate
+        expr: |
+          (
+            sum(rate(wenbot_trades_total{result="loss"}[1h]))
+            /
+            sum(rate(wenbot_trades_total[1h]))
+          ) > 0.7
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High loss rate detected"
+          description: "Loss rate is {{ $value | humanizePercentage }} over the last hour"
+      
+      - alert: DailyLossLimitApproaching
+        expr: wenbot_daily_pnl_usd < -250
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Approaching daily loss limit"
+          description: "Daily PnL is ${{ $value }}, approaching -$300 limit"
+      
+      - alert: DailyLossLimitExceeded
+        expr: wenbot_daily_pnl_usd < -300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Daily loss limit exceeded"
+          description: "Daily PnL is ${{ $value }}, exceeded -$300 limit. Trading should stop."
+      
+      - alert: LowBankroll
+        expr: wenbot_bankroll_usd < 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low bankroll"
+          description: "Bankroll is ${{ $value }}, below $100 threshold"
+      
+      - alert: TooManyPendingTrades
+        expr: wenbot_pending_trades > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Too many pending trades"
+          description: "{{ $value }} trades pending, may indicate settlement issues"
+
+  - name: wenbot_performance
+    interval: 5m
+    rules:
+      # Performance alerts
+      - alert: HighAPIErrorRate
+        expr: |
+          (
+            sum(rate(wenbot_api_requests_total{status=~"5.."}[5m]))
+            /
+            sum(rate(wenbot_api_requests_total[5m]))
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API error rate"
+          description: "API error rate is {{ $value | humanizePercentage }}"
+      
+      - alert: HighAPILatency
+        expr: histogram_quantile(0.95, wenbot_api_latency_seconds_bucket) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API latency"
+          description: "95th percentile latency is {{ $value }}s"
+      
+      - alert: SchedulerLagHigh
+        expr: wenbot_scheduler_lag_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scheduler lag is high"
+          description: "Scheduler job {{ $labels.job_name }} is lagging {{ $value }}s"
+
+  - name: wenbot_operational
+    interval: 10m
+    rules:
+      # Operational alerts
+      - alert: NoTradesIn24h
+        expr: increase(wenbot_trades_total[24h]) == 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "No trades in 24 hours"
+          description: "Bot hasn't executed any trades in the last 24 hours"
+      
+      - alert: EdgeTooLow
+        expr: avg_over_time(wenbot_edge_percent[1h]) < 0.05
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Average edge is low"
+          description: "Average edge is {{ $value | humanizePercentage }}, may indicate market efficiency"

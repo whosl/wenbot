@@ -1,0 +1,19 @@
+[package]
+name = "polymarket-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+base64 = "0.22"
+chrono = { workspace = true }
+dotenvy = { workspace = true }
