@@ -9,6 +9,11 @@ pub struct StoredCredentials {
     pub api_key: String,
     pub api_secret: String,
     pub api_passphrase: String,
+    pub address: String,
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub funder_address: Option<String>,
 }
 
 pub fn derive_file_key_hex(password: &str, srp_salt_hex: &str) -> String {
@@ -24,12 +29,18 @@ pub fn encrypt_credentials(
     api_key: &str,
     api_secret: &str,
     api_passphrase: &str,
+    address: &str,
     age_passphrase: &str,
+    private_key: Option<&str>,
+    funder_address: Option<&str>,
 ) -> Result<Vec<u8>> {
     let payload = serde_json::to_vec(&StoredCredentials {
         api_key: api_key.to_string(),
         api_secret: api_secret.to_string(),
         api_passphrase: api_passphrase.to_string(),
+        address: address.to_string(),
+        private_key: private_key.map(|s| s.to_string()),
+        funder_address: funder_address.map(|s| s.to_string()),
     })?;
 
     let encryptor = Encryptor::with_user_passphrase(SecretString::new(age_passphrase.to_string()));

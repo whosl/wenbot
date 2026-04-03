@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 const USERNAME: &str = "polymarket";
 const SRP_N_HEX: &str = concat!(
@@ -253,9 +253,39 @@ pub async fn connect_verify(
         Err(e) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": format!("failed to decrypt wallet credentials: {e}")}))),
     };
 
-    *state.polymarket_credentials.lock().await = Some(creds);
+    info!("🔓 Wallet decrypted: has_private_key={}, has_funder={}, addr={}", creds.private_key.is_some(), creds.funder_address.is_some(), &creds.address[..10]);
+
+    *state.polymarket_credentials.lock().await = Some(creds.clone());
+
+    // Create Polymarket CLOB client for live trading
+    let poly_config = polymarket_client::ClientConfig {
+        host: "https://clob.polymarket.com".to_string(),
+        chain_id: 137,
+        credentials: polymarket_client::ApiCredentials {
+            api_key: creds.api_key.clone(),
+            api_secret: creds.api_secret.clone(),
+            api_passphrase: creds.api_passphrase.clone(),
+        },
+        address: creds.address.clone(),
+        private_key: creds.private_key.clone(),
+        funder_address: creds.funder_address.clone(),
+        proxy: std::env::var("HTTPS_PROXY")
+            .or_else(|_| std::env::var("https_proxy"))
+            .or_else(|_| std::env::var("HTTP_PROXY"))
+            .or_else(|_| std::env::var("http_proxy"))
+            .ok(),
+    };
+    match polymarket_client::PolymarketClient::new(poly_config) {
+        Ok(client) => {
+            info!("✅ Polymarket CLOB client ready for live trading");
+            *state.polymarket_client.lock().await = Some(client);
+        }
+        Err(e) => {
+            error!("⚠️ Failed to create Polymarket client: {}", e);
+        }
+    }
+
     let m2 = compute_m2(&a_pub, &req.m1, &k);
-    info!("✅ Polymarket wallet connected");
     (
         StatusCode::OK,
         Json(serde_json::to_value(ConnectVerifyResponse { m2, connected: true }).unwrap()),
@@ -264,8 +294,65 @@ pub async fn connect_verify(
 
 pub async fn disconnect(State(state): State<SharedState>) -> (StatusCode, Json<serde_json::Value>) {
     *state.polymarket_credentials.lock().await = None;
+    *state.polymarket_client.lock().await = None;
     info!("Polymarket wallet disconnected");
     (StatusCode::OK, Json(serde_json::json!({"connected": false})))
+}
+
+/// Debug endpoint: directly unlock wallet with password (bypasses SRP)
+/// Only available when compiled with debug assertions
+pub async fn debug_unlock_wallet(
+    State(state): State<SharedState>,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let password = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if password.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "password required"})));
+    }
+
+    let cfg = match load_wallet_config(&state.db_pool).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "wallet not configured"}))),
+        Err(e) => return internal_error(e),
+    };
+
+    let file_key_hex = derive_file_key_hex(password, &cfg.srp_salt);
+    let creds = match decrypt_credentials(&cfg.age_ciphertext, &file_key_hex) {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": format!("decryption failed: {e}")}))),
+    };
+
+    info!("🔓 [DEBUG] Wallet unlocked: has_pk={}, has_funder={}, addr={}", 
+          creds.private_key.is_some(), creds.funder_address.is_some(), &creds.address[..10.min(creds.address.len())]);
+
+    *state.polymarket_credentials.lock().await = Some(creds.clone());
+
+    let host = std::env::var("POLYMARKET_HOST").unwrap_or_else(|_| "https://clob.polymarket.com".to_string());
+    let chain_id = std::env::var("POLYMARKET_CHAIN_ID").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(137);
+    let proxy = std::env::var("POLYMARKET_PROXY").ok();
+    let poly_config = polymarket_client::ClientConfig {
+        host, chain_id, proxy,
+        credentials: polymarket_client::ApiCredentials {
+            api_key: creds.api_key.clone(),
+            api_secret: creds.api_secret.clone(),
+            api_passphrase: creds.api_passphrase.clone(),
+        },
+        address: creds.address.clone(),
+        private_key: creds.private_key.clone(),
+        funder_address: creds.funder_address.clone(),
+    };
+
+    match polymarket_client::PolymarketClient::new(poly_config) {
+        Ok(client) => {
+            info!("✅ [DEBUG] Polymarket CLOB client ready");
+            *state.polymarket_client.lock().await = Some(client);
+        }
+        Err(e) => {
+            error!("⚠️ [DEBUG] Failed to create Polymarket client: {}", e);
+        }
+    }
+
+    (StatusCode::OK, Json(serde_json::json!({"connected": true, "address": creds.address, "has_private_key": creds.private_key.is_some(), "has_funder": creds.funder_address.is_some()})))
 }
 
 pub async fn polymarket_balance(State(state): State<SharedState>) -> (StatusCode, Json<serde_json::Value>) {
@@ -322,6 +409,11 @@ pub async fn setup_polymarket_interactive(pool: &SqlitePool) -> Result<()> {
     let api_key = prompt("Polymarket API key")?;
     let api_secret = prompt("Polymarket API secret")?;
     let api_passphrase = prompt("Polymarket API passphrase")?;
+    let address = prompt("Wallet address (0x...)")?;
+    let private_key_input = prompt("Private key (for EIP-712 order signing, enter to skip)")?;
+    let private_key = if private_key_input.is_empty() { None } else { Some(private_key_input) };
+    let funder_input = prompt("Proxy wallet (funder) address (for POLY_PROXY signing, enter to skip)")?;
+    let funder_address = if funder_input.is_empty() { None } else { Some(funder_input) };
     let password = rpassword::prompt_password("Wallet unlock password: ")?;
     let confirm = rpassword::prompt_password("Confirm wallet unlock password: ")?;
     if password != confirm {
@@ -331,7 +423,7 @@ pub async fn setup_polymarket_interactive(pool: &SqlitePool) -> Result<()> {
     let salt_hex = random_hex(16);
     let verifier_hex = compute_verifier_hex(USERNAME, &password, &salt_hex);
     let file_key_hex = derive_file_key_hex(&password, &salt_hex);
-    let age_ciphertext = encrypt_credentials(&api_key, &api_secret, &api_passphrase, &file_key_hex)?;
+    let age_ciphertext = encrypt_credentials(&api_key, &api_secret, &api_passphrase, &address, &file_key_hex, private_key.as_deref(), funder_address.as_deref())?;
     upsert_wallet_config(pool, &salt_hex, &verifier_hex, &age_ciphertext).await?;
     println!("✅ Polymarket wallet configured.");
     Ok(())
@@ -361,6 +453,9 @@ async fn build_client_from_state(state: &Arc<AppState>) -> Result<polymarket_cli
             api_secret: creds.api_secret,
             api_passphrase: creds.api_passphrase,
         },
+        address: creds.address.clone(),
+        private_key: creds.private_key,
+        funder_address: creds.funder_address,
     };
     polymarket_client::PolymarketClient::new(config).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e.to_string()}))))
 }
@@ -488,4 +583,56 @@ fn bad_request(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, Json<serde_json::Value>) {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": err.to_string()})))
+}
+
+/// Test endpoint: manually place a small Polymarket order to verify the signing pipeline.
+/// POST /api/polymarket/test-order
+/// Body: { "token_id": "0x...", "price": 0.5, "size": 1.0 }
+pub async fn test_polymarket_order(
+    State(state): State<SharedState>,
+    axum::extract::Json(body): axum::extract::Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let client = match state.polymarket_client.lock().await.clone() {
+        Some(c) => c,
+        None => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "wallet not connected"}))),
+    };
+
+    let token_id = body.get("token_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let price = body.get("price").and_then(|v| v.as_f64()).unwrap_or(0.5);
+    let size = body.get("size").and_then(|v| v.as_f64()).unwrap_or(1.0);
+
+    if token_id.is_empty() {
+        return bad_request("token_id is required");
+    }
+
+    info!("🧪 TEST ORDER: token_id={} (len={}), price={}, size={}", &token_id[..token_id.len().min(20)], token_id.len(), price, size);
+    info!("🧪 TEST ORDER: has_pk={}, addr={}", client.has_private_key(), client.address());
+
+    // Try build_buy_order
+    match client.build_buy_order(&token_id, price, size, None, false) {
+        Some(signed_order) => {
+            let body = serde_json::to_string(&signed_order).unwrap_or_default();
+            info!("🧪 TEST ORDER payload: {}", &body[..body.len().min(500)]);
+            info!("🧪 TEST ORDER: signed order built, maker={}, sig_len={}", signed_order.maker, signed_order.signature.len());
+            match client.place_signed_order(&signed_order).await {
+                Ok(resp) => {
+                    info!("🧪 TEST ORDER: placed! order_id={}, status={}", resp.order_id, resp.status);
+                    (StatusCode::OK, Json(serde_json::json!({
+                        "success": true,
+                        "order_id": resp.order_id,
+                        "status": resp.status,
+                        "fills": resp.fills.len(),
+                    })))
+                }
+                Err(e) => {
+                    error!("🧪 TEST ORDER: place failed: {}", e);
+                    (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": e.to_string()})))
+                }
+            }
+        }
+        None => {
+            error!("🧪 TEST ORDER: build_buy_order returned None");
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "build_buy_order failed (check logs for details)"})))
+        }
+    }
 }

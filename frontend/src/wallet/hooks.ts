@@ -42,6 +42,7 @@ import {
   depositWallet2,
   depositWallet3,
   depositWallet4,
+  depositWeather,
   syncPrices,
   syncWallet2Prices,
   syncWallet3Prices,

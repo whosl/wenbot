@@ -46,6 +46,8 @@ pub struct AppState {
     pub fivesbot_state: Arc<tokio::sync::Mutex<FivesbotLiveState>>,
     /// Unlocked Polymarket credentials kept in memory only.
     pub polymarket_credentials: Arc<tokio::sync::Mutex<Option<crate::crypto::StoredCredentials>>>,
+    /// Polymarket CLOB client for live trading (created on Connect Wallet).
+    pub polymarket_client: Arc<tokio::sync::Mutex<Option<polymarket_client::PolymarketClient>>>,
     /// Pending SRP handshakes.
     pub srp_sessions: Arc<tokio::sync::Mutex<HashMap<String, crate::srp_auth::PendingSrpSession>>>,
 }
@@ -110,10 +112,12 @@ pub fn create_router(state: SharedState) -> Router {
         .route("/api/wallet/connect/start", axum::routing::post(srp_auth::connect_start))
         .route("/api/wallet/connect/verify", axum::routing::post(srp_auth::connect_verify))
         .route("/api/wallet/connect/disconnect", axum::routing::post(srp_auth::disconnect))
+        .route("/api/wallet/debug-unlock", axum::routing::post(srp_auth::debug_unlock_wallet))
         .route("/api/polymarket/balance", axum::routing::get(srp_auth::polymarket_balance))
         .route("/api/polymarket/positions", axum::routing::get(srp_auth::polymarket_positions))
         .route("/api/polymarket/orders", axum::routing::get(srp_auth::polymarket_orders))
-        .route("/api/polymarket/trades", axum::routing::get(srp_auth::polymarket_trades));
+        .route("/api/polymarket/trades", axum::routing::get(srp_auth::polymarket_trades))
+        .route("/api/polymarket/test-order", axum::routing::post(srp_auth::test_polymarket_order));
 
     // Serve frontend static files with SPA fallback to index.html
     let frontend_dir = &state.frontend_dir;
@@ -187,6 +191,7 @@ pub async fn run(frontend_dir: String, port: u16, db_url: &str) -> Result<(), Bo
         fivesbot_wallet4_strategy,
         fivesbot_state,
         polymarket_credentials: Arc::new(tokio::sync::Mutex::new(None)),
+        polymarket_client: Arc::new(tokio::sync::Mutex::new(None)),
         srp_sessions: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
 

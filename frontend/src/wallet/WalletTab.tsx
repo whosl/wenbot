@@ -7,11 +7,12 @@ import {
   useWallet3Balance, useWallet3Positions, useWallet3History, useWallet3FivesbotTrades, useDepositWallet3, useSyncWallet3Prices, useSettleWallet3,
   useWallet4Balance, useWallet4Positions, useWallet4History, useWallet4FivesbotTrades, useDepositWallet4, useSyncWallet4Prices, useSettleWallet4,
   useWeatherBalance, useWeatherPositions, useWeatherHistory, useDepositWeather, useWalletConnectionStatus, useDisconnectWallet,
+  usePolyBalance, usePolyOrders, usePolyPositions,
 } from './hooks'
 import { RefreshCw, CircleDollarSign, TrendingUp, ArrowUpDown, Clock, ChevronLeft, ChevronRight, Plug, Power } from 'lucide-react'
 import { connectWalletWithPassword } from './srp'
 
-type WalletView = 'btc' | 'eth' | 'btc8' | 'btc5' | 'weather'
+type WalletView = 'poly' | 'btc' | 'eth' | 'btc8' | 'btc5' | 'weather'
 
 function formatUtcToUtc8Time(ts?: string | null): string {
   if (!ts) return '—'
@@ -279,6 +280,132 @@ function Btc5Wallet() {
   return <FivesWallet title="Wallet 4 · BTC 5m" balance={useWallet4Balance()} positions={useWallet4Positions()} history={useWallet4History()} trades={useWallet4FivesbotTrades(200)} deposit={useDepositWallet4()} sync={useSyncWallet4Prices()} settle={useSettleWallet4()} accent="blue" />
 }
 
+function PolyWallet() {
+  const qc = useQueryClient()
+  const { data: balance, isLoading: balLoading, error: balError, refetch: refetchBal } = usePolyBalance()
+  const { data: orders, isLoading: ordLoading } = usePolyOrders()
+  const { data: positions, isLoading: posLoading } = usePolyPositions()
+  const status = useWalletConnectionStatus()
+  const disconnect = useDisconnectWallet()
+  const [open, setOpen] = useState(false)
+  const [password, setPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const usdc = balance?.usdc_balance ?? 0
+  const allowance = balance?.usdc_allowance ?? 0
+  const configured = status.data?.configured
+  const connected = status.data?.connected
+
+  const handleConnect = async () => {
+    setSubmitting(true)
+    setError(null)
+    try {
+      await connectWalletWithPassword(password)
+      setPassword('')
+      setOpen(false)
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ['wallet-connect-status'] }),
+        qc.invalidateQueries({ queryKey: ['poly-balance'] }),
+        qc.invalidateQueries({ queryKey: ['poly-orders'] }),
+      ])
+    } catch (e: any) {
+      setError(e?.response?.data?.error || e?.message || 'Connect failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="p-3 space-y-3">
+      {/* Balance card with connect/disconnect */}
+      <div className="bg-black/40 border border-[#262626] rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <div className="text-[10px] text-neutral-500 uppercase tracking-[0.15em] font-mono">Polymarket Wallet</div>
+            <div className="text-xs text-neutral-400 font-mono mt-0.5">
+              {connected ? <span className="text-emerald-400">● 已连接</span> : configured ? <span className="text-neutral-400">○ 未连接</span> : <span className="text-amber-400">○ 未配置</span>}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => { refetchBal() }} className="p-1.5 rounded-lg border border-[#262626] hover:border-orange-500/30 text-neutral-500 hover:text-orange-400 transition-colors">
+              <RefreshCw size={12} />
+            </button>
+            {connected ? (
+              <button onClick={() => disconnect.mutate()} disabled={disconnect.isPending} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] uppercase tracking-wider font-mono text-red-300 border border-red-500/20 rounded-lg bg-red-500/5 disabled:opacity-50">
+                <Power size={10} />{disconnect.isPending ? '...' : 'Disconnect'}
+              </button>
+            ) : (
+              <button onClick={() => setOpen(true)} disabled={!configured || status.isLoading} className="inline-flex items-center gap-1 px-2.5 py-1.5 text-[10px] uppercase tracking-wider font-mono text-neutral-300 border border-[#262626] rounded-lg bg-[#050505] disabled:opacity-50">
+                <Plug size={10} />Connect
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-baseline gap-1">
+          <span className="text-2xl font-semibold text-orange-400 font-mono">${usdc.toFixed(2)}</span>
+          <span className="text-[10px] text-neutral-500 font-mono">USDC</span>
+        </div>
+        {allowance > 0 && (
+          <div className="mt-1 text-[10px] text-neutral-500 font-mono">Allowance: ${allowance.toFixed(2)}</div>
+        )}
+      </div>
+
+      {/* Open Orders */}
+      <SectionHeader title="Open Orders" icon={<Clock size={12} />} />
+      <QueryState isLoading={ordLoading} error={undefined}>
+        {Array.isArray(orders) && orders.length > 0 ? (
+          <MiniTable
+            columns={[
+              { key: 'market', label: 'Market', render: (v: any) => truncate(String(v.question || v.market || ''), 40) },
+              { key: 'side', label: 'Side', render: (v: any) => <DirectionBadge direction={v.side === 'BUY' ? 'YES' : 'NO'} /> },
+              { key: 'price', label: 'Price', render: (v: any) => formatPrice(v) },
+              { key: 'size', label: 'Size', render: (v: any) => String(v) },
+            ]}
+            data={orders}
+          />
+        ) : (
+          <div className="text-[11px] text-neutral-600 font-mono text-center py-4">No open orders</div>
+        )}
+      </QueryState>
+
+      {/* Positions */}
+      <SectionHeader title="Positions" icon={<TrendingUp size={12} />} />
+      <QueryState isLoading={posLoading} error={undefined}>
+        {Array.isArray(positions) && positions.length > 0 ? (
+          <MiniTable
+            columns={[
+              { key: 'market', label: 'Market', render: (v: any) => truncate(String(v.question || v.market || v.asset || ''), 40) },
+              { key: 'side', label: 'Side', render: (v: any) => <DirectionBadge direction={v.side || 'YES'} /> },
+              { key: 'size', label: 'Size', render: (v: any) => formatPrice(v.size ?? v.initialValue ?? v) },
+              { key: 'pnl', label: 'PnL', render: (v: any) => <PnLValue value={v.pnl ?? 0} /> },
+            ]}
+            data={positions}
+          />
+        ) : (
+          <div className="text-[11px] text-neutral-600 font-mono text-center py-4">No positions</div>
+        )}
+      </QueryState>
+
+      {/* Connect modal */}
+      {open && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#0a0a0a] border border-[#1a1a1a] rounded-2xl p-5 shadow-2xl">
+            <div className="text-sm font-semibold text-neutral-100 font-mono">连接 Polymarket 实盘钱包</div>
+            <div className="text-[11px] text-neutral-500 font-mono mt-2 leading-relaxed">密码不会明文发送。前端会先完成 SRP 握手，再用会话密钥包裹解锁密钥。</div>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoFocus className="mt-4 w-full bg-black border border-[#262626] rounded-lg px-3 py-2.5 text-sm text-neutral-100 font-mono outline-none focus:border-amber-500/40" placeholder="输入解锁密码" />
+            {error && <div className="mt-3 text-[11px] text-red-400 font-mono">{error}</div>}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button onClick={() => { setOpen(false); setPassword(''); setError(null) }} className="px-3 py-2 text-[10px] uppercase tracking-wider font-mono text-neutral-400 border border-[#262626] rounded-lg">Cancel</button>
+              <button onClick={handleConnect} disabled={!password || submitting} className="px-3 py-2 text-[10px] uppercase tracking-wider font-mono text-amber-300 border border-amber-500/20 rounded-lg bg-amber-500/5 disabled:opacity-50">{submitting ? 'Connecting' : 'Connect'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function WalletConnectBar() {
   const qc = useQueryClient()
   const status = useWalletConnectionStatus()
@@ -351,8 +478,9 @@ function WalletConnectBar() {
 }
 
 export function WalletTab() {
-  const [view, setView] = useState<WalletView>('btc')
+  const [view, setView] = useState<WalletView>('poly')
   const walletTabs = [
+    { id: 'poly', label: 'POLY', color: 'orange', icon: <span className="text-xs">🎯</span> },
     { id: 'btc', label: 'BTC (W1)', color: 'amber', icon: <span className="text-xs">₿</span> },
     { id: 'eth', label: 'ETH (W2)', color: 'violet', icon: <span className="text-xs">Ξ</span> },
     { id: 'btc8', label: 'BTC 8 (W3)', color: 'emerald', icon: <span className="text-xs">₿</span> },
@@ -360,5 +488,5 @@ export function WalletTab() {
     { id: 'weather', label: 'Weather (W5)', color: 'cyan', icon: <span className="text-xs">☁</span> },
   ]
 
-  return <div className="flex flex-col h-full"><WalletConnectBar /><TabBar tabs={walletTabs} active={view} onChange={(id) => setView(id as WalletView)} /><div className="flex-1 overflow-y-auto">{view === 'btc' ? <BtcWallet /> : view === 'eth' ? <EthWallet /> : view === 'btc8' ? <Btc8Wallet /> : view === 'btc5' ? <Btc5Wallet /> : <WeatherWallet />}</div></div>
+  return <div className="flex flex-col h-full"><TabBar tabs={walletTabs} active={view} onChange={(id) => setView(id as WalletView)} /><div className="flex-1 overflow-y-auto">{view === 'poly' ? <PolyWallet /> : view === 'btc' ? <BtcWallet /> : view === 'eth' ? <EthWallet /> : view === 'btc8' ? <Btc8Wallet /> : view === 'btc5' ? <Btc5Wallet /> : <WeatherWallet />}</div></div>
 }

@@ -452,6 +452,12 @@ async fn run_weather_cycle(state: &AppState) -> Result<(), Box<dyn std::error::E
             continue;
         }
 
+        // Temporarily disable YES direction (historical win rate only 2.5%)
+        if direction == "YES" {
+            info!("Skipping YES direction for weather (temporarily disabled, WR=2.5%)");
+            continue;
+        }
+
         if today_realized_pnl <= -cfg.daily_loss_limit {
             warn!("Skipping trade because daily loss limit is active");
             continue;
@@ -694,12 +700,71 @@ async fn run_fivesbot_cycle(state: &AppState, asset: &str, wallet_override: Opti
                 if let Err(e) = wallet.insert_btc_trade_ledger(&ledger_entry).await {
                     error!("Failed to write {} trade ledger for position {}: {}", asset.to_uppercase(), pos_id.id, e);
                 }
+
+                // Live trading on Polymarket for ETH strategy
+                if asset.eq_ignore_ascii_case("eth") {
+                    let trade_size = trade.size;
+                    let buy_price = signal.buy_price;
+                    let buy_token = signal.buy_token_id.clone();
+                    let slug = market.slug.clone();
+                    let dir_str = direction.to_string();
+                    let poly_client = state.polymarket_client.lock().await.clone();
+                    if let Some(client) = poly_client {
+                        info!("🔑 POLY client check: has_pk={}, token={}", client.has_private_key(), &buy_token[..buy_token.len().min(20)]);
+                        place_polymarket_order(&client, &slug, &buy_token, &dir_str, buy_price, trade_size).await;
+                    } else {
+                        warn!("🔑 POLY: no client in state (wallet not connected?)");
+                    }
+                }
             }
             Err(e) => warn!("Failed to open {} fivesbot position on {}: {}", asset.to_uppercase(), market.slug, e),
         }
     }
 
     Ok(())
+}
+
+/// Place a live order on Polymarket CLOB.
+/// Strategy: build EIP-712 signed order and place it.
+async fn place_polymarket_order(
+    client: &polymarket_client::PolymarketClient,
+    slug: &str,
+    token_id: &str,
+    direction: &str,
+    price: f64,
+    size_usd: f64,
+) {
+    let quantity = (size_usd / price).round();
+
+    // Build signed order (EIP-712)
+    // maker_address: use client's funder_address (proxy wallet), defaults to EOA
+    // neg_risk: false for standard crypto markets
+    let signed_order = match client.build_buy_order(token_id, price, quantity, None, false) {
+        Some(order) => order,
+        None => {
+            error!("❌ POLY: no private key configured, cannot sign order for {}", slug);
+            return;
+        }
+    };
+
+    info!(
+        "🔄 POLY SIGNED ORDER: {} {} qty={:.0} price={:.3} size=${:.2} maker={}",
+        slug, direction, quantity, price, size_usd, signed_order.maker,
+    );
+
+    match client.place_signed_order(&signed_order).await {
+        Ok(resp) => {
+            info!(
+                "✅ POLY ORDER PLACED: {} order_id={} status={}",
+                slug, resp.order_id, resp.status,
+            );
+            if !resp.fills.is_empty() {
+                let total_filled: f64 = resp.fills.iter().map(|f| f.size).sum();
+                info!("✅ POLY FILLED: {} qty={:.0} fills={}", slug, total_filled, resp.fills.len());
+            }
+        }
+        Err(e) => error!("❌ POLY ORDER failed for {}: {}", slug, e),
+    }
 }
 
 async fn sync_wallet_prices(wallet: &virtual_wallet::VirtualWallet) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
@@ -840,9 +905,9 @@ async fn settle_expired_weather_positions(state: &AppState) -> Result<(), Box<dy
 fn evaluate_settlement(question: &str, trade_direction: &str, threshold: Option<f64>, actual_temp: f64) -> f64 {
     let threshold = threshold.unwrap_or(actual_temp);
     let q = question.to_lowercase();
-    let market_yes = if q.contains(" or above") || q.contains("above ") {
+    let market_yes = if q.contains(" or higher") || q.contains(" or above") || q.contains("above ") {
         actual_temp >= threshold
-    } else if q.contains(" or below") || q.contains("below ") {
+    } else if q.contains(" or lower") || q.contains(" or below") || q.contains("below ") {
         actual_temp <= threshold
     } else if q.contains(" between ") {
         let nums: Vec<f64> = q
@@ -1002,10 +1067,9 @@ pub async fn fetch_active_updown_markets(asset: &str) -> Result<Vec<UpDownMarket
                 }
 
                 // Check seconds remaining - only trade windows with > 1 min left
-                if let Some(secs) = seconds_remaining(&end_date) {
-                    if secs < 60 || secs > 15 * 60 {
-                        continue;
-                    }
+                let remaining = seconds_remaining(&end_date).unwrap_or(0);
+                if remaining < 60 || remaining > 15 * 60 {
+                    continue;
                 }
 
                 let event_slug = event.get("slug").and_then(|v| v.as_str()).unwrap_or(asset).to_string();
@@ -1107,10 +1171,9 @@ pub async fn fetch_active_updown_5m_markets(asset: &str) -> Result<Vec<UpDownMar
                 }
 
                 // 5-minute windows: trade windows with > 30s left and < 5min
-                if let Some(secs) = seconds_remaining(&end_date) {
-                    if secs < 30 || secs > 5 * 60 {
-                        continue;
-                    }
+                let remaining = seconds_remaining(&end_date).unwrap_or(0);
+                if remaining < 30 || remaining > 5 * 60 {
+                    continue;
                 }
 
                 let event_slug = event.get("slug").and_then(|v| v.as_str()).unwrap_or(asset).to_string();

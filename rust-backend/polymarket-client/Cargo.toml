@@ -17,3 +17,8 @@ hex = { workspace = true }
 base64 = "0.22"
 chrono = { workspace = true }
 dotenvy = { workspace = true }
+k256 = "0.13"
+sha3 = "0.10"
+rand = "0.8"
+num-bigint = { version = "0.4", features = ["serde"] }
+num-traits = "0.2"

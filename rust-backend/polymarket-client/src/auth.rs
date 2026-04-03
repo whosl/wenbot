@@ -58,19 +58,32 @@ impl std::fmt::Display for ApiCredentials {
 }
 
 /// L1签名的 API 请求头生成
+#[derive(Clone)]
 pub struct L1Signature {
     api_key: String,
     api_secret: String,
     api_passphrase: String,
+    address: String,
 }
 
 impl L1Signature {
-    pub fn new(creds: &ApiCredentials) -> Self {
+    pub fn new(creds: &ApiCredentials, address: &str) -> Self {
         Self {
             api_key: creds.api_key.clone(),
             api_secret: creds.api_secret.clone(),
             api_passphrase: creds.api_passphrase.clone(),
+            address: address.to_lowercase(),
         }
+    }
+
+    /// Returns the signer address (lowercase, without 0x prefix)
+    pub fn address(&self) -> String {
+        self.address.clone()
+    }
+
+    /// Get the API key UUID
+    pub fn api_key(&self) -> &str {
+        &self.api_key
     }
 
     /// Generate HMAC-SHA256 signature and return L1 auth headers.
@@ -86,12 +99,17 @@ impl L1Signature {
         let signature = hmac_sha256(&self.api_secret, &message);
 
         tracing::debug!(
-            "POLY signing: method={} path={} body_len={} sig_len={} key_prefix=...{}",
+            "POLY signing: method={} path={} body_len={} sig_len={} key_prefix=...{} secret_len={} secret_end=...{} pass_len={} addr={}",
             method, path, body.len(), signature.len(),
             &self.api_key[self.api_key.len().saturating_sub(6)..],
+            self.api_secret.len(),
+            &self.api_secret[self.api_secret.len().saturating_sub(4)..],
+            self.api_passphrase.len(),
+            self.address,
         );
 
         let mut hdrs = AuthHeaders::new();
+        hdrs.set("POLY_ADDRESS", self.address.clone());
         hdrs.set("POLY_API_KEY", self.api_key.clone());
         hdrs.set("POLY_SIGNATURE", signature);
         hdrs.set("POLY_PASSPHRASE", self.api_passphrase.clone());
@@ -126,14 +144,21 @@ fn hmac_sha256(secret: &str, message: &str) -> String {
 
     type HmacSha256 = Hmac<Sha256>;
 
-    // Decode base64url-encoded secret to raw bytes (Polymarket stores secrets as base64url)
-    let secret_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+    // Decode base64url-encoded secret to raw bytes
+    // Polymarket stores secrets as base64url (may or may not have padding)
+    let secret_bytes = base64::engine::general_purpose::URL_SAFE
         .decode(secret)
         .unwrap_or_else(|_| {
-            // Fallback: try standard base64
-            base64::engine::general_purpose::STANDARD
-                .decode(secret)
-                .unwrap_or_else(|_| secret.as_bytes().to_vec())
+            // Fallback: strip padding and try NO_PAD
+            let trimmed = secret.trim_end_matches('=');
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(trimmed)
+                .unwrap_or_else(|_| {
+                    // Last resort: try standard base64
+                    base64::engine::general_purpose::STANDARD
+                        .decode(secret)
+                        .unwrap_or_else(|_| secret.as_bytes().to_vec())
+                })
         });
 
     let mut mac = HmacSha256::new_from_slice(&secret_bytes)
@@ -141,8 +166,8 @@ fn hmac_sha256(secret: &str, message: &str) -> String {
     mac.update(message.as_bytes());
     let result = mac.finalize();
 
-    // Encode result as base64url (no padding, matching Python SDK)
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(result.into_bytes())
+    // Encode result as base64url (WITH padding, matching Polymarket server requirements)
+    base64::engine::general_purpose::URL_SAFE.encode(result.into_bytes())
 }
 
 #[cfg(test)]
@@ -154,7 +179,7 @@ mod tests {
         let sig1 = hmac_sha256("secret", "hello world");
         let sig2 = hmac_sha256("secret", "hello world");
         assert_eq!(sig1, sig2);
-        assert_eq!(sig1.len(), 64); // SHA256 hex = 64 chars
+        assert_eq!(sig1.len(), 44); // base64url SHA256 = 44 chars (with padding)
     }
 
     #[test]

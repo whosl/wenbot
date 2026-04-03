@@ -129,11 +129,10 @@ pub async fn fetch_daily_temperature_markets_inner() -> Result<Vec<DailyTempMark
         .map(|d| d.format("%Y-%m-%d").to_string())
         .collect();
 
-    let proxy = reqwest::Proxy::all("http://127.0.0.1:7890")?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
-        .proxy(proxy)
         .user_agent("wenbot-rust/0.1.0")
+        .no_proxy()
         .build()?;
 
     let mut bundles = Vec::new();
@@ -348,9 +347,17 @@ struct ParsedThreshold {
 
 fn parse_temp_threshold(question: &str) -> Option<ParsedThreshold> {
     let q = question.to_lowercase().replace('°', "").replace('º', "");
+    if let Some(idx) = q.find(" or lower") {
+        let thresh = last_number(&q[..idx])?;
+        return Some(ParsedThreshold { direction: "below".into(), threshold: thresh, range_low: None, range_high: None });
+    }
     if let Some(idx) = q.find(" or below") {
         let thresh = last_number(&q[..idx])?;
         return Some(ParsedThreshold { direction: "below".into(), threshold: thresh, range_low: None, range_high: None });
+    }
+    if let Some(idx) = q.find(" or higher") {
+        let thresh = last_number(&q[..idx])?;
+        return Some(ParsedThreshold { direction: "above".into(), threshold: thresh, range_low: None, range_high: None });
     }
     if let Some(idx) = q.find(" or above") {
         let thresh = last_number(&q[..idx])?;

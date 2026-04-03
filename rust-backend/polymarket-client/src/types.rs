@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use num_bigint::BigUint;
 
 // ─── Market types ───
 
@@ -124,9 +125,66 @@ pub struct Order {
     pub side: Side,
     pub order_type: OrderType,
     pub price: f64,
+    /// Size in shares / conditional tokens.
     pub size: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expiration: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum SignatureType {
+    Eoa = 0,
+    PolyGnosisSafe = 1,
+    PolyProxy = 2,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedOrder {
+    #[serde(serialize_with = "serialize_salt_as_u64_or_bigint")]
+    pub salt: BigUint,
+    pub maker: String,
+    pub signer: String,
+    pub taker: String,
+    #[serde(rename = "tokenId")]
+    pub token_id: String,
+    #[serde(rename = "makerAmount")]
+    pub maker_amount: String,
+    #[serde(rename = "takerAmount")]
+    pub taker_amount: String,
+    pub expiration: String,
+    pub nonce: String,
+    #[serde(rename = "feeRateBps")]
+    pub fee_rate_bps: String,
+    pub side: Side,
+    #[serde(rename = "signatureType")]
+    pub signature_type: u8,
+    pub signature: String,
+}
+
+/// Serialize BigUint salt as a JSON number.
+/// Python SDK sends salt as an integer (not string), so we must match.
+/// For values that fit in u64, serialize as u64; otherwise use string (shouldn't happen for salt).
+fn serialize_salt_as_u64_or_bigint<S: serde::Serializer>(val: &BigUint, s: S) -> Result<S::Ok, S::Error> {
+    // Try to fit in u64 (typical for salt), otherwise serialize as string
+    let bytes = val.to_bytes_be();
+    if bytes.len() <= 8 {
+        let mut arr = [0u8; 8];
+        arr[8 - bytes.len()..].copy_from_slice(&bytes);
+        s.serialize_u64(u64::from_be_bytes(arr))
+    } else {
+        s.serialize_str(&val.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderPostRequest {
+    pub order: SignedOrder,
+    pub owner: String,
+    #[serde(rename = "orderType")]
+    pub order_type: OrderType,
+    #[serde(rename = "postOnly")]
+    pub post_only: bool,
 }
 
 impl Order {
@@ -161,6 +219,10 @@ impl Order {
             size,
             expiration: None,
         }
+    }
+
+    pub fn post_only(&self) -> bool {
+        matches!(self.order_type, OrderType::Gtc | OrderType::Gtd)
     }
 }
 
@@ -320,5 +382,34 @@ mod tests {
     fn test_tick_size_rounding() {
         assert_eq!(TickSize::Cent.round_price(0.557), 0.55);
         assert_eq!(TickSize::Mill.round_price(0.5575), 0.557);
+    }
+
+    #[test]
+    fn test_salt_serialization() {
+        use super::*;
+        let order = SignedOrder {
+            salt: num_bigint::BigUint::from(123456u64),
+            maker: "0x0000000000000000000000000000000000000000".to_string(),
+            signer: "0x0000000000000000000000000000000000000000".to_string(),
+            taker: "0x0000000000000000000000000000000000000000".to_string(),
+            token_id: "12345".to_string(),
+            maker_amount: "100".to_string(),
+            taker_amount: "200".to_string(),
+            expiration: "0".to_string(),
+            nonce: "0".to_string(),
+            fee_rate_bps: "0".to_string(),
+            side: Side::Buy,
+            signature_type: 0,
+            signature: "0x1234".to_string(),
+        };
+        let json_str = serde_json::to_string(&order).unwrap();
+        // Salt should be serialized as a JSON number, not a string
+        assert!(json_str.contains("\"salt\":123456"), "salt should be a JSON number, got: {}", json_str);
+        assert!(!json_str.contains("\"salt\":\""), "salt should NOT be a JSON string, got: {}", json_str);
+        
+        // Also test nested in json!
+        let wrapper = serde_json::json!({"order": &order});
+        let wrapper_str = serde_json::to_string(&wrapper).unwrap();
+        assert!(wrapper_str.contains("\"salt\":123456"), "nested salt should be number, got: {}", wrapper_str);
     }
 }

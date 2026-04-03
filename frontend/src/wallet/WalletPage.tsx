@@ -14,8 +14,8 @@ export default function WalletPage() {
 
   const tabs = [
     { id: 'overview', label: 'Overview', icon: <span className="text-xs">📊</span> },
-    { id: 'wallet', label: 'Wallet', icon: <span className="text-xs">💰</span> },
     { id: 'poly', label: 'Polymarket', icon: <span className="text-xs">🌐</span> },
+    { id: 'wallet', label: 'Wallet', icon: <span className="text-xs">💰</span> },
     { id: 'strategy', label: 'Strategy', icon: <span className="text-xs">⚙</span> },
   ]
 

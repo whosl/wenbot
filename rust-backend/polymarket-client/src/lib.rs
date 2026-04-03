@@ -10,8 +10,11 @@
 
 mod auth;
 mod client;
+mod eip712;
 mod error;
 mod types;
+
+use anyhow::Context;
 
 pub use auth::ApiCredentials;
 pub use client::PolymarketClient;
@@ -27,6 +30,14 @@ pub struct ClientConfig {
     pub chain_id: u64,
     /// API credentials (from env vars)
     pub credentials: ApiCredentials,
+    /// Wallet address / EOA address (checksummed, 0x-prefixed)
+    pub address: String,
+    /// Private key used for EIP-712 order signing
+    pub private_key: Option<String>,
+    /// Proxy wallet (funder) address for POLY_PROXY signature type.
+    /// For MetaMask + Polymarket proxy wallets, this is the proxy contract address
+    /// that holds the actual USDC balance.
+    pub funder_address: Option<String>,
     /// Optional HTTP proxy
     pub proxy: Option<String>,
 }
@@ -42,6 +53,7 @@ impl ClientConfig {
     /// Optional:
     /// - `POLYMARKET_CLOB_HOST` (default: https://clob.polymarket.com)
     /// - `POLYMARKET_CLOB_CHAIN_ID` (default: 137)
+    /// - `POLYMARKET_ADDRESS` (wallet address)
     /// - `HTTPS_PROXY` / `https_proxy`
     pub fn from_env() -> anyhow::Result<Self> {
         Ok(Self {
@@ -51,6 +63,10 @@ impl ClientConfig {
                 .unwrap_or_else(|_| "137".into())
                 .parse()?,
             credentials: ApiCredentials::from_env()?,
+            address: std::env::var("POLYMARKET_ADDRESS")
+                .context("POLYMARKET_ADDRESS not set")?,
+            private_key: std::env::var("POLYMARKET_PRIVATE_KEY").ok(),
+            funder_address: std::env::var("POLYMARKET_FUNDER_ADDRESS").ok(),
             proxy: std::env::var("HTTPS_PROXY")
                 .or_else(|_| std::env::var("https_proxy"))
                 .or_else(|_| std::env::var("HTTP_PROXY"))
